@@ -1,0 +1,4 @@
+[2026-03-14 19:49:34.771] [piper] [info] Loaded voice in 0.2615437 second(s)
+[2026-03-14 19:49:34.808] [piper] [info] Initialized piper
+[2026-03-14 19:49:36.437] [piper] [info] Real-time factor: 0.07755375158361487 (infer=0.0333147 sec, audio=0.4295691609977324 sec)
+[2026-03-14 19:49:36.437] [piper] [info] Terminated piper
