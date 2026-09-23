@@ -176,3 +176,8 @@ cd ..
 ## Data and Secrets
 
 Large PDFs, FAISS files, generated audio, virtual environments, dependency folders, and `.env` files are excluded through `.gitignore`. Keep API keys out of source control.
+
+Done by 
+Sai Aditiyaa R S
+B.E CSE
+
