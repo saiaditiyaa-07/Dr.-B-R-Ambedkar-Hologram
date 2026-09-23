@@ -1,14 +1,39 @@
+# FastAPI server for Avatar Chatbot - Tamil TTS fixed
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
+import threading
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass  # python-dotenv not installed — env vars must be set externally
 
 from agents import safety_agent, main_agent, cleanup_agent
 from agents.main_agent import clear_history
 from tts import text_to_speech, get_audio_duration, generate_mouth_cues, clean_text
+from rag.retriever import preload as rag_preload
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def warmup_rag():
+    """
+    Pre-load the FAISS index and sentence-transformer embedding model
+    in a background thread so server startup is instant and the first
+    user request pays no cold-start penalty (~48 second saving).
+    """
+    def _warmup():
+        try:
+            rag_preload()
+        except Exception as exc:
+            print(f"[Startup] RAG pre-warm error (non-fatal): {exc}")
+    threading.Thread(target=_warmup, daemon=True, name="rag-warmup").start()
 
 # ── CORS ──────────────────────────────────────────────────────
 app.add_middleware(
@@ -34,7 +59,7 @@ app.add_middleware(
 def run_pipeline(question: str, voice: str = "male", input_lang: str = "auto"):
     """
     Runs the full 3-agent pipeline and returns
-    (answer_text, audio_filename, mouth_cues).
+    (answer_text, audio_filename, mouth_cues, sources).
     """
 
     # ── Agent 1: Safety ──────────────────────────────────────
@@ -46,29 +71,35 @@ def run_pipeline(question: str, voice: str = "male", input_lang: str = "auto"):
             audio_file = text_to_speech(error_msg, voice)
             duration   = get_audio_duration(audio_file)
             cues       = generate_mouth_cues(error_msg, duration)
-            return error_msg, audio_file, cues
+            return error_msg, audio_file, cues, []
         except Exception:
-            return error_msg, None, None
+            return error_msg, None, None, []
 
     if not is_safe:
         blocked_msg = "I'm sorry, I can't help with that. Please ask me something else."
         audio_file  = text_to_speech(blocked_msg, voice)
         duration    = get_audio_duration(audio_file)
         cues        = generate_mouth_cues(blocked_msg, duration)
-        return blocked_msg, audio_file, cues
+        return blocked_msg, audio_file, cues, []
 
-    # ── Agent 2: Main response ────────────────────────────────
+
+    # ── Agent 2: Main response (now returns tuple with sources) ─
+    sources = []
     try:
-        raw_response = main_agent(question, input_lang)
+        result = main_agent(question, input_lang)
+        if isinstance(result, tuple):
+            raw_response, sources = result
+        else:
+            raw_response = result  # backward compatibility
     except RuntimeError as e:
         error_msg = str(e)
         try:
             audio_file = text_to_speech(error_msg, voice)
             duration   = get_audio_duration(audio_file)
             cues       = generate_mouth_cues(error_msg, duration)
-            return error_msg, audio_file, cues
+            return error_msg, audio_file, cues, []
         except Exception:
-            return error_msg, None, None
+            return error_msg, None, None, []
 
     # ── Agent 3: Cleanup ──────────────────────────────────────
     try:
@@ -95,13 +126,17 @@ def run_pipeline(question: str, voice: str = "male", input_lang: str = "auto"):
         audio_file = text_to_speech(tts_text, voice)
     except RuntimeError as e:
         print(f"[TTS Error] {e}")
-        return final_text, None, None
+        return final_text, None, None, sources
 
     # ── Mouth cues ────────────────────────────────────────────
-    duration   = get_audio_duration(audio_file)
-    mouth_cues = generate_mouth_cues(tts_text, duration)
+    try:
+        duration   = get_audio_duration(audio_file)
+        mouth_cues = generate_mouth_cues(tts_text, duration)
+    except Exception as exc:
+        print(f"[MouthCues Error] {exc}")
+        mouth_cues = []
 
-    return final_text, audio_file, mouth_cues
+    return final_text, audio_file, mouth_cues, sources
 
 
 # ═════════════════════════════════════════════════════════════
@@ -120,16 +155,25 @@ class MouthCuesRequest(BaseModel):
 
 
 @app.post("/voice-chat")
-async def voice_chat(request: VoiceRequest):
-    answer, audio_file, mouth_cues = run_pipeline(request.message, request.voice, request.input_lang)
+async def voice_chat(request: VoiceRequest, raw_req: Request):
+    base_url = str(raw_req.base_url).rstrip("/")
+    result = run_pipeline(request.message, request.voice, request.input_lang)
+
+    # Unpack with backward compatibility
+    if len(result) == 4:
+        answer, audio_file, mouth_cues, sources = result
+    else:
+        answer, audio_file, mouth_cues = result
+        sources = []
 
     if not answer:
         answer = "I'm sorry, I couldn't find an answer to your question."
 
     return {
-        "audio_url":  f"http://127.0.0.1:8001/audio/{audio_file}" if audio_file else None,
+        "audio_url":  f"{base_url}/audio/{audio_file}" if audio_file else None,
         "text":       answer,
         "mouthCues":  mouth_cues,
+        "sources":    sources,
     }
 
 
@@ -147,16 +191,17 @@ async def get_audio(filename: str, request: Request):
     else:
         content_type = "audio/wav"
 
+    headers = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+
     if request.method == "HEAD":
         file_size = os.path.getsize(file_path)
+        headers["Content-Length"] = str(file_size)
+        headers["Content-Type"] = content_type
         return Response(
             status_code=200,
-            headers={
-                "Content-Type": content_type,
-                "Content-Length": str(file_size),
-            },
+            headers=headers,
         )
-    return FileResponse(file_path, media_type=content_type)
+    return FileResponse(file_path, media_type=content_type, headers=headers)
 
 
 @app.post("/mouthCues")

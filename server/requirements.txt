@@ -7,3 +7,8 @@ gtts  # Alternative TTS engine (optional)
 pydantic
 google-cloud-texttospeech
 requests
+
+# RAG pipeline dependencies
+PyMuPDF          # PDF text extraction (import as fitz)
+faiss-cpu        # Vector similarity search
+sentence-transformers  # Embedding model

@@ -37,7 +37,12 @@ function App() {
   const playAudio = async (url, mouthCues) => {
     try {
       const bustedUrl = url.includes('?') ? `${url}&t=${Date.now()}` : `${url}?t=${Date.now()}`;
-      
+      const ext = url.split('?')[0].split('.').pop().toLowerCase();
+      const mimeType = ext === 'mp3' ? 'audio/mpeg' : (ext === 'wav' ? 'audio/wav' : 'audio/unknown');
+
+      console.log(`[Audio] URL: ${bustedUrl}`);
+      console.log(`[Audio] MIME/type: ${mimeType}`);
+
       stopCurrentAudio();
 
       const audio = audioRef.current;
@@ -60,15 +65,20 @@ function App() {
         setLipsyncData(null);
       };
 
+      const onError = (e) => {
+        console.error(`[Audio] Playback error:`, audio.error || e);
+      };
+
       audio.addEventListener('timeupdate', updateProgress);
       audio.addEventListener('ended', onEnded);
+      audio.addEventListener('error', onError, { once: true });
 
       // Play the audio
       await audio.play();
-      console.log(`[Audio] ▶ Playing DOM Audio Element`);
+      console.log(`[Audio] Playback started`);
 
     } catch (err) {
-      console.warn('[Audio] Audio failed to play, using silent animation:', err);
+      console.error(`[Audio] Playback error:`, err);
       simulateSpeechAnimation(mouthCues);
     }
   };
@@ -162,11 +172,24 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyPress);
   }, []);
 
+  const [displayMode, setDisplayMode] = useState('laptop'); // 'laptop' | 'hologram'
+
   return (
-    <div className="container" style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
+    <div className={`container ${displayMode === 'laptop' ? 'laptop-mode' : 'hologram-mode'}`}>
       
       {/* Hidden DOM Audio Element for reliable playback */}
       <audio ref={audioRef} style={{ display: 'none' }} />
+
+      {/* Mode Switcher Toggle Button */}
+      <div className="mode-toggle-container">
+        <button
+          className="mode-toggle-btn"
+          onClick={() => setDisplayMode(prev => prev === 'laptop' ? 'hologram' : 'laptop')}
+          title="Toggle display mode for Laptop vs Glass Hologram setup"
+        >
+          {displayMode === 'laptop' ? '💻 Laptop Mode' : '📐 Hologram Mode'}
+        </button>
+      </div>
 
       <Canvas className="canvas">
         <ambientLight intensity={0.5} />
@@ -179,33 +202,25 @@ function App() {
         />
       </Canvas>
 
-      {/* Subtitle / Reply Overlay */}
+      {/* Compact Floating Response Text Panel */}
       {(replyText || isLoading) && (
-        <div style={{
-          position: 'absolute',
-          top: '20px',
-          left: '50%',
-          transform: 'translateX(-50%) scaleX(-1)',
-          background: 'rgba(15, 23, 42, 0.85)',
-          backdropFilter: 'blur(8px)',
-          border: '1px solid rgba(255, 255, 255, 0.15)',
-          color: '#f8fafc',
-          padding: '12px 24px',
-          borderRadius: '16px',
-          maxWidth: '80%',
-          textAlign: 'center',
-          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
-          zIndex: 10,
-          fontSize: '16px',
-          lineHeight: '1.5',
-        }}>
-          {isLoading
-            ? <span style={{ color: '#94a3b8' }}>Thinking &amp; generating voice... 💭</span>
-            : <span>{replyText}</span>
-          }
+        <div className="response-panel">
+          <div className="response-panel-header">
+            <span className="avatar-icon">🏛️</span>
+            <span className="avatar-name">Dr. B. R. Ambedkar</span>
+          </div>
+          <div className="response-panel-body">
+            {isLoading ? (
+              <div className="loading-state">
+                <span className="pulse-dot"></span>
+                <span>Thinking &amp; generating voice... 💭</span>
+              </div>
+            ) : (
+              <span>{replyText}</span>
+            )}
+          </div>
         </div>
       )}
-
 
       {/* Voice selector + speech/text input */}
       <SpeechToText

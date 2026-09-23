@@ -2,80 +2,149 @@ import os
 import re
 import wave
 import subprocess
+import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 try:
-    from gtts import gTTS
-except Exception:  # pragma: no cover
-    gTTS = None
+    import edge_tts
+except ImportError:
+    edge_tts = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PIPER_EXE = os.path.join(BASE_DIR, "piper", "piper.exe")
 
-VOICES = {
-    "male":   os.path.join(BASE_DIR, "piper", "en_US-ryan-medium.onnx"),
-    "female": os.path.join(BASE_DIR, "piper", "en_US-kathleen-low.onnx"),
-    "indian": os.path.join(BASE_DIR, "piper", "en_US-kusal-medium.onnx"),
+# Explicit Male Voice Configuration for all supported languages
+TTS_VOICES = {
+    "en": {
+        "edge": "en-US-ChristopherNeural",
+        "piper": os.path.join(BASE_DIR, "piper", "en_US-ryan-medium.onnx"),
+        "gender": "Male",
+        "description": "Microsoft Christopher Neural (Male)"
+    },
+    "ta": {
+        "edge": "ta-IN-ValluvarNeural",
+        "piper": None,
+        "gender": "Male",
+        "description": "Microsoft Valluvar Neural (Male)"
+    },
+    "hi": {
+        "edge": "hi-IN-MadhurNeural",
+        "piper": None,
+        "gender": "Male",
+        "description": "Microsoft Madhur Neural (Male)"
+    }
 }
-DEFAULT_VOICE = "male"
+DEFAULT_LANG = "en"
 
 
-# ═════════════════════════════════════════════════════════════
-#  TTS
-# ═════════════════════════════════════════════════════════════
-def text_to_speech(text: str, voice_key: str = DEFAULT_VOICE) -> str:
-    """
-    Runs Piper TTS if local assets are available; otherwise falls back to gTTS.
-    Returns the filename of the generated audio.
-    """
-    # Multilingual TTS Routing
-    is_tamil = bool(re.search(r'[\u0B80-\u0BFF]', text))
-    is_hindi = bool(re.search(r'[\u0900-\u097F]', text))
-    
-    if is_tamil or is_hindi:
-        if gTTS is None:
-            raise RuntimeError("gTTS is required for Tamil/Hindi TTS but is not installed.")
+async def _generate_edge_tts(text: str, voice_name: str, output_path: str) -> bool:
+    """Helper to run edge_tts with retries for connection stability."""
+    if edge_tts is None:
+        return False
+    for attempt in range(1, 4):
         try:
-            audio_file_path = os.path.join(BASE_DIR, "response.mp3")
-            lang_code = "ta" if is_tamil else "hi"
-            tts = gTTS(text=text, lang=lang_code, slow=False)
-            tts.save(audio_file_path)
-            print(f"[TTS] Generated multilingual ({lang_code}) audio: {audio_file_path}")
-            return "response.mp3"
+            communicate = edge_tts.Communicate(text, voice_name)
+            await communicate.save(output_path)
+            return True
         except Exception as exc:
-            raise RuntimeError(f"Multilingual TTS failed: {exc}")
+            print(f"[TTS] Edge-TTS attempt {attempt} failed for voice {voice_name}: {exc}")
+            if attempt < 3:
+                await asyncio.sleep(0.5)
+    return False
 
-    if os.path.exists(PIPER_EXE) and os.path.exists(VOICES.get(voice_key, VOICES[DEFAULT_VOICE])):
-        voice_model = VOICES.get(voice_key, VOICES[DEFAULT_VOICE])
-        audio_file_path = os.path.join(BASE_DIR, "response.wav")
 
+def _run_edge_tts_sync(text: str, voice_name: str, output_path: str) -> bool:
+    """Runs _generate_edge_tts safely in a dedicated worker thread with a clean event loop."""
+    def _worker():
+        return asyncio.run(_generate_edge_tts(text, voice_name, output_path))
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_worker)
+            return future.result(timeout=30)
+    except Exception as exc:
+        print(f"[TTS] Event loop execution error: {exc}")
+        return False
+
+
+def text_to_speech(text: str, voice_key: str = "male") -> str:
+    """
+    Generates audio using ALWAYS MALE voices for English, Tamil, and Hindi.
+    Guarantees no female voice fallback path.
+    Returns the audio filename ('response.mp3' or 'response.wav').
+    """
+    # Determine language
+    if re.search(r'[\u0B80-\u0BFF]', text):
+        lang_code = "ta"
+    elif re.search(r'[\u0900-\u097F]', text):
+        lang_code = "hi"
+    else:
+        lang_code = "en"
+
+    voice_config = TTS_VOICES.get(lang_code, TTS_VOICES[DEFAULT_LANG])
+    voice_name = voice_config["edge"]
+
+    # 1. Try Edge-TTS Male Voice
+    audio_mp3_path = os.path.join(BASE_DIR, "response.mp3")
+    if os.path.exists(audio_mp3_path):
+        try:
+            os.remove(audio_mp3_path)
+        except Exception:
+            pass
+
+    success = _run_edge_tts_sync(text, voice_name, audio_mp3_path)
+    if success and os.path.exists(audio_mp3_path) and os.path.getsize(audio_mp3_path) > 0:
+        file_size = os.path.getsize(audio_mp3_path)
+        print(f"[TTS] Language: {lang_code}")
+        print(f"[TTS] Voice: {voice_name}")
+        print(f"[TTS] Output: response.mp3")
+        print(f"[TTS] File exists: True")
+        print(f"[TTS] File size: {file_size}")
+        return "response.mp3"
+
+    # 2. English Male Piper Fallback (Offline)
+    piper_model = voice_config.get("piper")
+    if piper_model and os.path.exists(PIPER_EXE) and os.path.exists(piper_model):
+        audio_wav_path = os.path.join(BASE_DIR, "response.wav")
+        if os.path.exists(audio_wav_path):
+            try:
+                os.remove(audio_wav_path)
+            except Exception:
+                pass
         try:
             result = subprocess.run(
-                [PIPER_EXE, "--model", voice_model, "--output_file", audio_file_path],
+                [PIPER_EXE, "--model", piper_model, "--output_file", audio_wav_path],
                 input=text.encode("utf-8"),
                 capture_output=True,
                 timeout=30,
             )
-            if result.returncode != 0:
-                raise RuntimeError(f"Piper error: {result.stderr.decode()}")
-            print(f"[TTS] Generated {audio_file_path} with voice: {voice_key}")
-            return "response.wav"
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Piper TTS timed out.")
-
-    if gTTS is not None:
-        try:
-            audio_file_path = os.path.join(BASE_DIR, "response.mp3")
-            tts = gTTS(text=text, lang="en", slow=False)
-            tts.save(audio_file_path)
-            print(f"[TTS] Generated fallback audio: {audio_file_path}")
-            return "response.mp3"
+            if result.returncode == 0 and os.path.exists(audio_wav_path) and os.path.getsize(audio_wav_path) > 0:
+                file_size = os.path.getsize(audio_wav_path)
+                print(f"[TTS] Language: {lang_code}")
+                print(f"[TTS] Voice: {voice_config['description']}")
+                print(f"[TTS] Output: response.wav")
+                print(f"[TTS] File exists: True")
+                print(f"[TTS] File size: {file_size}")
+                return "response.wav"
+            else:
+                print(f"[TTS] Piper error: {result.stderr.decode()}")
         except Exception as exc:
-            raise RuntimeError(f"Fallback TTS failed: {exc}")
+            print(f"[TTS] Piper fallback failed: {exc}")
 
+    # 3. Log warning — Strict policy: NEVER fallback to female voice
+    file_exists = os.path.exists(audio_mp3_path)
+    file_size = os.path.getsize(audio_mp3_path) if file_exists else 0
+    print(f"[TTS] Language: {lang_code}")
+    print(f"[TTS] Voice: {voice_name}")
+    print(f"[TTS] Output: response.mp3")
+    print(f"[TTS] File exists: {file_exists}")
+    print(f"[TTS] File size: {file_size}")
     raise RuntimeError(
-        "Piper not found and gTTS is unavailable. "
-        "Install a local TTS engine or ensure the Piper voice files are present."
+        f"[TTS] Male voice for language '{lang_code}' ({voice_name}) is currently unavailable. "
+        "Female voice fallback is disabled."
     )
+
 
 
 # ═════════════════════════════════════════════════════════════

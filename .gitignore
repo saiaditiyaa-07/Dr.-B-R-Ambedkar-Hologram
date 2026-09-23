@@ -32,3 +32,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# RAG data (large binary files)
+server/data/ambedkar/writings/*.pdf
+server/data/ambedkar/vectorstore/
