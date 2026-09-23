@@ -131,15 +131,15 @@ html, body {
 /* ── HOLOGRAM MODE (Physical 45-degree Glass Mirror Setup) ── */
 
 .container.hologram-mode {
-  transform: rotate(-90deg);
-  transform-origin: center;
+  transform: none;
 }
 
 .container.hologram-mode .canvas {
   position: absolute;
   width: 100%;
   height: 100%;
-  transform: translate(-15%, 15%);
+  transform: scaleX(-1);
+  transform-origin: center;
 }
 
 .container.hologram-mode .response-panel {
